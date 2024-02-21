@@ -2,10 +2,8 @@
  * Functions for handling and tracing masks.
  */
 
-const {
-  generatePolygonSegments,
-  convertSegmentsToSVG,
-} = require("./custom_tracer");
+import { generatePolygonSegments, convertSegmentsToSVG } from "./custom_tracer";
+import { Path } from "./models";
 import { Tensor } from "onnxruntime-web";
 /**
  * Converts mask array into RLE array using the fortran array
@@ -61,10 +59,11 @@ export const traceRleToSVG = (
     | Float64Array
     | Uint32Array
     | BigUint64Array,
-  height: number
+  height: number,
+  scale: number
 ) => {
   const polySegments = generatePolygonSegments(rleMask, height);
-  const svgStr = convertSegmentsToSVG(polySegments);
+  const svgStr = convertSegmentsToSVG(polySegments, scale);
   return svgStr;
 };
 
@@ -189,111 +188,53 @@ export const traceOnnxMaskToSVG = (
     | Uint32Array
     | BigUint64Array,
   height: number,
-  width: number
+  width: number,
+  scale: number
 ) => {
   const rleMask = maskDataToFortranArrayToRle(maskData, width, height);
-  let svgStr = traceRleToSVG(rleMask, width);
+  let svgStr = traceRleToSVG(rleMask, width, scale);
   svgStr = filterSmallSVGRegions(svgStr);
   return svgStr;
 };
 
-/**
- * Converts compressed RLE string into SVG
- * @param {string} maskString
- * @param {number} height
- * @returns {string}
- */
-export const traceCompressedRLeStringToSVG = (
-  maskString: string | null,
-  height: number
-) => {
-  const rleMask = rleFrString(maskString);
-  let svgStr = traceRleToSVG(rleMask, height);
-  svgStr = filterSmallSVGRegions(svgStr);
-  return svgStr;
-};
+export const convertPathsToSvg = (paths: Path[], scale: number) => {
+  // 2. Compute desired direction for each path, flip if necessary, then convert to SVG string
+  const renderedPaths = [];
 
-/**
- * Parses RLE from compressed string
- * @param {Array<number>} input
- * @returns array of integers
- */
-export const rleFrString = (input: any) => {
-  let result = [];
-  let charIndex = 0;
-  while (charIndex < input.length) {
-    let value = 0,
-      k = 0,
-      more = 1;
-    while (more) {
-      let c = input.charCodeAt(charIndex) - 48;
-      value |= (c & 0x1f) << (5 * k);
-      more = c & 0x20;
-      charIndex++;
-      k++;
-      if (!more && c & 0x10) value |= -1 << (5 * k);
-    }
-    if (result.length > 2) value += result[result.length - 2];
-    result.push(value);
-  }
-  return result;
-};
-
-function toImageData(input: any, width: number, height: number) {
-  const [r, g, b, a] = [0, 114, 189, 255];
-  const arr = new Uint8ClampedArray(4 * width * height).fill(0);
-  for (let i = 0; i < input.length; i++) {
-    if (input[i] > 0.0) {
-      arr[4 * i + 0] = r;
-      arr[4 * i + 1] = g;
-      arr[4 * i + 2] = b;
-      arr[4 * i + 3] = a;
-    }
-  }
-  return new ImageData(arr, height, width);
-}
-
-function imageDataToImage(imageData: ImageData) {
-  const canvas = imageDataToCanvas(imageData);
-  const image = new Image();
-  image.src = canvas.toDataURL();
-  return image;
-}
-
-function imageDataToCanvas(imageData: ImageData) {
+  // We use a canvas element to draw the paths and check isPointInPath to determine wanted direction
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
-  canvas.width = imageData.width;
-  canvas.height = imageData.height;
-  ctx?.putImageData(imageData, 0, 0);
-  return canvas;
-}
 
-export function rleToImage(input: any, width: number, height: number) {
-  return imageDataToImage(toImageData(input, width, height));
-}
+  for (const path of paths) {
+    // Count how many other paths a point contained inside this path is contained within
+    //  if odd number: should be clockwise, even number: should be counter-clockwise
+    let shouldBeClockwise = false;
+    const [sampleX, sampleY] = path[0];
+    for (const otherPath of renderedPaths) {
+      if (
+        ctx!.isPointInPath(
+          otherPath,
+          sampleX * scale + 0.5,
+          sampleY * scale + 0.5
+        )
+      )
+        shouldBeClockwise = !shouldBeClockwise;
+    }
+    // All paths are default counter-clockwise based on how the segments were generated,
+    //    so reverse the points in the path if it is supposed to be clockwise
+    if (shouldBeClockwise) path.reverse();
 
-export function rleToCanvas(input: any, width: number, height: number) {
-  return imageDataToCanvas(toImageData(input, width, height));
-}
-
-// Returns a boolean array for which masks to keep in the multi-mask
-// display, given uncertain IoUs and overlap IoUs.
-export function keepArrayForMultiMask(
-  uncertainIoUs: number[],
-  overlapIoUs: number[],
-  uncertainThresh: number = 0.8,
-  overlapThresh: number = 0.9
-) {
-  let keepArray = uncertainIoUs.map((iou: number) => iou > uncertainThresh);
-  const duplicateArray = overlapIoUs.map((iou: number) => iou < overlapThresh);
-  keepArray = keepArray.map(
-    (val: boolean, i: number) => val && duplicateArray[i]
-  );
-  // If all masks fail tests, keep just the best one
-  if (keepArray.every((item) => item === false)) {
-    const bestIdx = uncertainIoUs.indexOf(Math.max(...uncertainIoUs));
-    keepArray[bestIdx] = true;
+    // Build the SVG data string for this path
+    const stringPoints = path
+      .slice(1)
+      .map(([x, y]) => `${x * scale} ${y * scale}`)
+      .join(" ");
+    const svgStr =
+      `M${path[0][0] * scale} ${path[0][1] * scale} L` + stringPoints;
+    // Add a new Path2D to the canvas to be able to call isPointInPath for the remaining paths
+    const pathObj = new Path2D(svgStr);
+    ctx!.fill(pathObj);
+    renderedPaths.push(pathObj);
   }
-  return keepArray;
-}
+  return renderedPaths;
+};

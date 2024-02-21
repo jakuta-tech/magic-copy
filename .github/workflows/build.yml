@@ -4,40 +4,40 @@ on:
   push:
     branches: [main]
     tags:
-      - '*'
+      - "*"
   pull_request:
     branches: [main]
+  release:
+    types: [created]
 
 jobs:
   build:
+    strategy:
+      matrix:
+        platform: [chrome, firefox, figma]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
       - name: Use Node.js 18.x
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v3
         with:
           node-version: 18.x
+      - uses: paulhatch/semantic-version@v5.0.2
+        id: semantic
+      - run: |
+          sed -i "s/\"version\": \".*\"/\"version\": \"${{ steps.semantic.outputs.version }}\"/" public/manifest.${{ matrix.platform }}.json
+          sed -i "s/\"version\": \".*\"/\"version\": \"${{ steps.semantic.outputs.version }}\"/" package.json
       - run: npm ci
-      - run: npm run build
-      - env:
-          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
-        run: |
-          echo "$CRX_PRIVATE_KEY" > dist.pem
-          chmod 600 dist.pem
-          ./buildcrx.sh -d dist -p dist.pem -o .
-          zip -r magic-copy.zip dist
+      - run: npm run build:${{ matrix.platform }}
       - name: Upload zip
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
-          name: magic-copy
+          name: magic-copy-${{ matrix.platform }}
           path: dist
-      - name: Upload crx
-        uses: actions/upload-artifact@v2
-        with:
-          name: magic-copy.crx
-          path: dist.crx
       - name: Upload to release
         uses: softprops/action-gh-release@v1
-        if: ${{startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
         with:
-          files: magic-copy.zip
+          files: magic-copy-${{ matrix.platform }}.zip
